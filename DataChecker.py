@@ -1,13 +1,58 @@
-import numpy as np
-import pandas as pd
-import polars as pl
-import torch
-import tensorflow as tf
 from collections import defaultdict
-import random
+
+# Lazy-loaded module cache
+_np = _pd = _pl = _torch = _tf = None
 
 
-DEFAULT_DATA_TYPES=(np.ndarray,pd.DataFrame,pl.DataFrame,pd.Series,pl.Series,torch.Tensor,tf.Tensor)
+def get_np():
+    global _np
+    if _np is None:
+        import numpy as np
+        _np = np
+    return _np
+
+
+def get_pd():
+    global _pd
+    if _pd is None:
+        import pandas as pd
+        _pd = pd
+    return _pd
+
+
+def get_pl():
+    global _pl
+    if _pl is None:
+        import polars as pl
+        _pl = pl
+    return _pl
+
+
+def get_torch():
+    global _torch
+    if _torch is None:
+        import torch
+        _torch = torch
+    return _torch
+
+
+def get_tf():
+    global _tf
+    if _tf is None:
+        import tensorflow as tf
+        _tf = tf
+    return _tf
+
+
+DEFAULT_DATA_TYPES = (
+    "numpy.ndarray",
+    "pandas.DataFrame",
+    "polars.DataFrame",
+    "pandas.Series",
+    "polars.Series",
+    "torch.Tensor",
+    "tensorflow.Tensor",
+)
 
 class DataChecker:
     """
@@ -27,130 +72,137 @@ class DataChecker:
             inspect() call instead of raising.
  
     """
-    def __init__(self,sporadic=None,report_card=False):
+    def __init__(self, sporadic=None, report_card=False):
+        self.report_card = report_card
+        self.sporadic = sporadic
 
-        self.report_card=report_card
-        self.sporadic=sporadic
-        self.TypeCheck=None
-        
-        self.passes=0
-        self.report=[]
-        self.cntr=0
+        self.passes = 0
+        self.report = []
 
-    def __call__(self,vars:list):
+    def __call__(self, vars: list):
         return self.inspect(vars)
 
-    def inspect(self,vars:list)->None:    
-        self.passes+=1
+    def inspect(self, vars: list) -> None:
+        self.passes += 1
 
-        if self.sporadic == -1 and self.passes !=1:
+        if self.sporadic == -1 and self.passes != 1:
             return
         elif self.sporadic and self.passes % self.sporadic != 0:
             return
-        
-        self.report=[]
-    
-        groups: defaultdict[str, list] = defaultdict(list)
-        for index, var in enumerate(vars): 
-            match var:
-                case np.ndarray():
-                    groups["np"].append(var)
-                case pd.DataFrame() | pd.Series():
-                    groups["pd"].append(var)
-                case pl.DataFrame() | pl.Series():
-                    groups["pl"].append(var)
-                case torch.Tensor():
-                    groups["torch"].append(var)
-                case tf.Tensor():
-                    groups["tf"].append(var)
-                case _:
-                    self._handle_err(ERR_MSG['Type'],type(var))
 
-        self.np_check(groups['np'])
-        self.pd_check(groups['pd'])
-        self.pl_check(groups['pl'])
-        self.tf_check(groups['tf'])
-        self.torch_check(groups['torch'])
+        self.report = []
+
+        groups = defaultdict(list)
+
+        for var in vars:
+            module_name = type(var).__module__
+
+            if module_name.startswith("numpy"):
+                groups["np"].append(var)
+
+            elif module_name.startswith("pandas"):
+                groups["pd"].append(var)
+
+            elif module_name.startswith("polars"):
+                groups["pl"].append(var)
+
+            elif module_name.startswith("torch"):
+                groups["torch"].append(var)
+
+            elif module_name.startswith("tensorflow"):
+                groups["tf"].append(var)
+
+            else:
+                self._handle_err(ERR_MSG['Type'], type(var))
+
+        self.np_check(groups["np"])
+        self.pd_check(groups["pd"])
+        self.pl_check(groups["pl"])
+        self.tf_check(groups["tf"])
+        self.torch_check(groups["torch"])
 
         if self.report:
             print("\n".join(self.report))
 
-    def torch_check(self,vars:list):
-        for index,arg in enumerate(vars):
-            try:
-                assert not torch.isinf(arg).any()
-            except AssertionError:
-                self._handle_err(ERR_MSG['inf'],"torch.Tensor")
-            try:
-                assert not torch.isnan(arg).any()
-            except AssertionError:
-                self._handle_err(ERR_MSG['Nan'],"torch.Tensor")
+    def np_check(self, vars: list):
+        if not vars:
+            return
+        np = get_np()
 
-    def pd_check(self,vars:list):
+        for arr in vars:
+            if np.any(np.isinf(arr)):
+                self._handle_err(ERR_MSG['Inf'], "np.ndarray")
+
+            if np.any(np.isnan(arr)):
+                self._handle_err(ERR_MSG['Nan'], "np.ndarray")
+
+    def pd_check(self, vars: list):
+        if not vars:
+            return
+        pd = get_pd()
+        np = get_np()
+
         for df in vars:
-            try:
-                assert not df.isnull().values.any()
-            except AssertionError:
-                self._handle_err(ERR_MSG['Nan'],"pd.Dataframe or pd.Series")
+            if df.isnull().values.any():
+                self._handle_err(ERR_MSG['Nan'], "pd.DataFrame or pd.Series")
 
-            try:
-                assert not np.isinf(df.select_dtypes('number')).values.any()
-            except AssertionError:
-                self._handle_err(ERR_MSG['Inf'],"pd.Dataframe or pd.Series")
+            if np.isinf(df.select_dtypes('number')).values.any():
+                self._handle_err(ERR_MSG['Inf'], "pd.DataFrame or pd.Series")
 
     def pl_check(self, vars: list):
-        for index, df in enumerate(vars):
+        if not vars:
+            return
+        pl = get_pl()
+
+        for df in vars:
             if isinstance(df, pl.Series):
                 df = df.to_frame()
-            try:
-                assert not any(df.null_count().row(0))
-            except AssertionError:
-                self._handle_err(ERR_MSG['Null'], "pl.Dataframe or pl.Series")
 
-            try:
-                assert not any(df.select(pl.all().is_nan().any()).row(0))
-            except AssertionError:
-                self._handle_err(ERR_MSG['Nan'], "pl.Dataframe or pl.Series")
+            if any(df.null_count().row(0)):
+                self._handle_err(ERR_MSG['Null'], "pl.DataFrame or pl.Series")
 
-            try:
-                assert not any(df.select(pl.all().is_infinite().any()).row(0))
-            except AssertionError:
-                self._handle_err(ERR_MSG['Inf'], "pl.Dataframe or pl.Series")
-    def np_check(self, vars:list):
-        for index,np_array in enumerate(vars):
-            try:
-                assert not np.any(np.isinf(np_array))
-            except AssertionError:
-                self._handle_err(ERR_MSG['Inf'],"np.ndarray")
-            
-            try:
-                assert not np.any(np.isnan(np_array))
-            except AssertionError:
-                self._handle_err(ERR_MSG['Nan'],"np.ndarray")
+            if any(df.select(pl.all().is_nan().any()).row(0)):
+                self._handle_err(ERR_MSG['Nan'], "pl.DataFrame or pl.Series")
 
-    def tf_check(self,vars:list):
-        for index,tf_tensor in enumerate(vars):
-            try:
-                assert not any(tf.math.is_inf(tf_tensor))
-            except AssertionError:
-                self._handle_err(ERR_MSG["Inf"],"tf.Tensor")
+            if any(df.select(pl.all().is_infinite().any()).row(0)):
+                self._handle_err(ERR_MSG['Inf'], "pl.DataFrame or pl.Series")
 
-            try:
-                assert not any(tf.math.is_nan(tf_tensor))
-            except AssertionError:
-                self._handle_err(ERR_MSG['Nan'],"tf.Tensor")
-                
-    def _handle_err(self,err_msg,var=None):
-        
-        msg=err_msg.format(var=var)
+    def torch_check(self, vars: list):
+        if not vars:
+            return
+        torch = get_torch()
+
+        for t in vars:
+            if torch.isinf(t).any():
+                self._handle_err(ERR_MSG['Inf'], "torch.Tensor")
+
+            if torch.isnan(t).any():
+                self._handle_err(ERR_MSG['Nan'], "torch.Tensor")
+
+    def tf_check(self, vars: list):
+        if not vars:
+            return
+        tf = get_tf()
+
+        for t in vars:
+            if any(tf.math.is_inf(t)):
+                self._handle_err(ERR_MSG["Inf"], "tf.Tensor")
+
+            if any(tf.math.is_nan(t)):
+                self._handle_err(ERR_MSG['Nan'], "tf.Tensor")
+
+    def _handle_err(self, err_msg, var=None):
+        msg = err_msg.format(var=var)
+
         if self.report_card:
             self.report.append(msg)
         else:
             raise RuntimeError(msg)
 
-ERR_MSG={   
-    "Nan":"Encountered a {var} that contains Nans",
-    "Inf":"Encountered a {var} that contains inf",
-    'Null' : "Encountered a {var} that contains Nulls",
-    "Type":f"Only {DEFAULT_DATA_TYPES} are supported but encountered " + "{var}",
+
+ERR_MSG = {
+    "Nan": "Encountered a {var} that contains NaNs",
+    "Inf": "Encountered a {var} that contains inf",
+    "Null": "Encountered a {var} that contains Nulls",
+    "Type": f"Only {DEFAULT_DATA_TYPES} are supported but encountered " + "{var}",
 }
